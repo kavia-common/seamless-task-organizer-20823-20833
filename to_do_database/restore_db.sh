@@ -3,10 +3,11 @@
 # Universal Database Restore Script
 # Automatically detects backup type and restores to running database
 
-DB_NAME="myapp"
-DB_USER="appuser"
-DB_PASSWORD="dbuser123"
-DB_PORT="5000"
+DB_NAME="${DB_NAME:-myapp}"
+DB_USER="${DB_USER:-appuser}"
+DB_PASSWORD="${DB_PASSWORD:-dbuser123}"
+# FIX: default to port 5001 to match container requirement
+DB_PORT="${DB_PORT:-5001}"
 
 # SQLite restore
 if [ -f "database_backup.db" ]; then

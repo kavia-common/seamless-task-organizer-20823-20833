@@ -1,28 +1,37 @@
 #!/bin/bash
 
-DB_NAME="myapp"
-DB_USER="appuser"
-DB_PASSWORD="dbuser123"
-DB_PORT="5000"
+# Allow override via environment but default to documented values
+DB_NAME="${DB_NAME:-myapp}"
+DB_USER="${DB_USER:-appuser}"
+DB_PASSWORD="${DB_PASSWORD:-dbuser123}"
+# FIX: Use port 5001 as required by the container spec
+DB_PORT="${DB_PORT:-5001}"
 
-echo "Starting MySQL setup..."
+echo "Starting MySQL setup on port ${DB_PORT}..."
 
-# Check if MySQL is already running on the specified port
+# Ensure runtime directories exist and have correct permissions
+if [ ! -d "/var/run/mysqld" ]; then
+  sudo mkdir -p /var/run/mysqld
+  sudo chown mysql:mysql /var/run/mysqld || true
+  sudo chmod 775 /var/run/mysqld || true
+fi
+
+# Check if MySQL is already running on the socket
 if sudo mysqladmin ping --socket=/var/run/mysqld/mysqld.sock --silent 2>/dev/null; then
     echo "MySQL is already running!"
-    
+
     # Try to verify the database exists
     if sudo mysql --socket=/var/run/mysqld/mysqld.sock -e "USE ${DB_NAME};" 2>/dev/null; then
         echo "Database ${DB_NAME} is accessible."
     fi
-    
+
     echo ""
     echo "Database: ${DB_NAME}"
     echo "Root user: root (password: ${DB_PASSWORD})"
-    echo "App user: appuser (password: ${DB_PASSWORD})"
+    echo "App user: ${DB_USER} (password: ${DB_PASSWORD})"
     echo "Port: ${DB_PORT}"
     echo ""
-    
+
     # Check if connection info file exists
     if [ -f "db_connection.txt" ]; then
         echo "To connect to the database, use:"
@@ -31,7 +40,7 @@ if sudo mysqladmin ping --socket=/var/run/mysqld/mysqld.sock --silent 2>/dev/nul
         echo "To connect to the database, use:"
         echo "mysql -u root -p${DB_PASSWORD} -h localhost -P ${DB_PORT} ${DB_NAME}"
     fi
-    
+
     echo ""
     echo "Script stopped - MySQL server already running."
     exit 0
@@ -41,7 +50,7 @@ fi
 if pgrep -f "mysqld.*--port=${DB_PORT}" > /dev/null 2>&1; then
     echo "Found existing MySQL process on port ${DB_PORT}"
     echo "Attempting to verify connection..."
-    
+
     # Try to connect via TCP
     if mysql -u root -p${DB_PASSWORD} -h 127.0.0.1 -P ${DB_PORT} -e "SELECT 1;" 2>/dev/null; then
         echo "MySQL is accessible on port ${DB_PORT}."
@@ -53,7 +62,7 @@ fi
 # Check if MySQL is running on default socket but different port
 if [ -S /var/run/mysqld/mysqld.sock ]; then
     echo "Found MySQL socket, checking if it's using port ${DB_PORT}..."
-    CURRENT_PORT=$(sudo mysql --socket=/var/run/mysqld/mysqld.sock -e "SHOW VARIABLES LIKE 'port';" 2>/dev/null | grep port | awk '{print $2}')
+    CURRENT_PORT=$(sudo mysql --socket=/var/run/mysqld/mysqld.sock -e "SHOW VARIABLES LIKE 'port';" 2>/dev/null | awk '/port/ {print $2}')
     if [ "$CURRENT_PORT" = "${DB_PORT}" ]; then
         echo "MySQL is already running on port ${DB_PORT}!"
         echo "Script stopped - server already running."
@@ -72,22 +81,34 @@ if [ ! -d "/var/lib/mysql/mysql" ]; then
 fi
 
 # Start MySQL server in background using sudo
-echo "Starting MySQL server..."
-sudo mysqld --user=mysql --datadir=/var/lib/mysql --socket=/var/run/mysqld/mysqld.sock --pid-file=/var/run/mysqld/mysqld.pid --port=${DB_PORT} &
+echo "Starting MySQL server on port ${DB_PORT}..."
+sudo mysqld --user=mysql \
+  --datadir=/var/lib/mysql \
+  --socket=/var/run/mysqld/mysqld.sock \
+  --pid-file=/var/run/mysqld/mysqld.pid \
+  --port=${DB_PORT} &
 
 # Wait for MySQL to be ready
 echo "Waiting for MySQL to start..."
-sleep 5
+# Initial grace period
+sleep 3
 
-# Check if MySQL is running using socket
-for i in {1..15}; do
+READY=0
+for i in {1..30}; do
     if sudo mysqladmin ping --socket=/var/run/mysqld/mysqld.sock --silent 2>/dev/null; then
         echo "MySQL is ready!"
+        READY=1
         break
     fi
-    echo "Waiting... ($i/15)"
+    echo "Waiting... ($i/30)"
     sleep 2
 done
+
+if [ $READY -ne 1 ]; then
+    echo "ERROR: MySQL did not become ready in time."
+    echo "Hint: check permissions on /var/run/mysqld and /var/lib/mysql, and review mysqld logs."
+    exit 1
+fi
 
 # Configure database and user - Fix MySQL 8.0 authentication
 echo "Setting up database and fixing authentication..."
@@ -99,8 +120,8 @@ ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DB_PAS
 CREATE DATABASE IF NOT EXISTS ${DB_NAME};
 
 -- Create a new user for remote connections
-CREATE USER IF NOT EXISTS 'appuser'@'%' IDENTIFIED BY '${DB_PASSWORD}';
-GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO 'appuser'@'%';
+CREATE USER IF NOT EXISTS '${DB_USER}'@'%' IDENTIFIED BY '${DB_PASSWORD}';
+GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'%';
 
 -- Grant privileges to root
 GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO 'root'@'localhost';
@@ -124,7 +145,7 @@ EOF
 echo "MySQL setup complete!"
 echo "Database: ${DB_NAME}"
 echo "Root user: root (password: ${DB_PASSWORD})"
-echo "App user: appuser (password: ${DB_PASSWORD})"
+echo "App user: ${DB_USER} (password: ${DB_PASSWORD})"
 echo "Port: ${DB_PORT}"
 echo ""
 
